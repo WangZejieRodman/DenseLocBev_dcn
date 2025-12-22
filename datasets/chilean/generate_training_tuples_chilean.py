@@ -12,7 +12,7 @@ from datasets.base_datasets import TrainingTuple
 
 # 数据集路径配置
 BASE_PATH = "/home/wzj/pan2/Chilean_Underground_Mine_Dataset_Many_Times/"
-RUNS_FOLDER = "chilean_4096/"
+RUNS_FOLDER = "chilean_NoRot_NoScale/"
 FILENAME = "pointcloud_locations_20m_10overlap.csv"
 POINTCLOUD_FOLS = "/pointcloud_20m_10overlap/"
 

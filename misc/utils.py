@@ -5,7 +5,10 @@ import configparser
 import time
 import numpy as np
 
-from datasets.quantization import PolarQuantizer, CartesianQuantizer
+# =========================================================
+# 修改点 1: 导入 BEVQuantizer
+# =========================================================
+from datasets.quantization import PolarQuantizer, CartesianQuantizer, BEVQuantizer
 
 
 class ModelParams:
@@ -16,33 +19,69 @@ class ModelParams:
 
         self.model_params_path = model_params_path
         self.model = params.get('model')
-        self.output_dim = params.getint('output_dim', 256)      # Size of the final descriptor
+        self.output_dim = params.getint('output_dim', 256)  # 最终全局描述子的维度
 
         #######################################################################
         # Model dependent
         #######################################################################
 
         self.coordinates = params.get('coordinates', 'polar')
-        assert self.coordinates in ['polar', 'cartesian'], f'Unsupported coordinates: {self.coordinates}'
+        # =========================================================
+        # 修改点 2: 在 assert 中允许 'bev'
+        # =========================================================
+        assert self.coordinates in ['polar', 'cartesian', 'bev'], f'Unsupported coordinates: {self.coordinates}'
 
         if 'polar' in self.coordinates:
-            # 3 quantization steps for polar coordinates: for sectors (in degrees), rings (in meters) and z coordinate (in meters)
+            # 极坐标量化的3个步长: 扇区(度), 环(米), Z轴(米)
             self.quantization_step = tuple([float(e) for e in params['quantization_step'].split(',')])
-            assert len(self.quantization_step) == 3, f'Expected 3 quantization steps: for sectors (degrees), rings (meters) and z coordinate (meters)'
+            assert len(
+                self.quantization_step) == 3, f'Expected 3 quantization steps: for sectors (degrees), rings (meters) and z coordinate (meters)'
             self.quantizer = PolarQuantizer(quant_step=self.quantization_step)
+
         elif 'cartesian' in self.coordinates:
-            # Single quantization step for cartesian coordinates
+            # 笛卡尔坐标系的单一量化步长
             self.quantization_step = params.getfloat('quantization_step')
             self.quantizer = CartesianQuantizer(quant_step=self.quantization_step)
+
+        # =========================================================
+        # 修改点 3: 新增 bev 坐标系的参数解析逻辑
+        # =========================================================
+        elif 'bev' in self.coordinates:
+            # 解析 BEV 特有的参数
+
+            # 1. 解析 coords_range (例如: -10., -10, -4, 10, 10, 8)
+            if 'coords_range' in params:
+                self.coords_range = [float(e) for e in params['coords_range'].split(',')]
+            else:
+                # 默认值 (Chilean数据集配置)
+                self.coords_range = [-10., -10, -4, 10, 10, 8]
+
+            # 2. 解析 div_n (例如: 256, 256, 32)
+            if 'div_n' in params:
+                self.div_n = [int(e) for e in params['div_n'].split(',')]
+            else:
+                # 默认值
+                self.div_n = [256, 256, 32]
+
+            # 3. 解析 in_channels (Z轴层数, 通常等于 div_n[2])
+            # 这个参数会被 model_factory 用来初始化 Backbone
+            self.in_channels = params.getint('in_channels', self.div_n[2])
+
+            # 4. 实例化 BEVQuantizer
+            self.quantizer = BEVQuantizer(coords_range=self.coords_range, div_n=self.div_n)
+
         else:
             raise NotImplementedError(f"Unsupported coordinates: {self.coordinates}")
 
-        # Use cosine similarity instead of Euclidean distance
-        # When Euclidean distance is used, embedding normalization is optional
+        # 使用余弦相似度还是欧氏距离
+        # 当使用欧氏距离时，embedding 归一化是可选的
         self.normalize_embeddings = params.getboolean('normalize_embeddings', False)
 
-        # Size of the local features from backbone network (only for MinkNet based models)
+        # Backbone 输出的局部特征维度 (仅用于基于 MinkNet 的模型)
         self.feature_size = params.getint('feature_size', 256)
+
+        # 以下参数主要用于原本的 MinkFPN/ResNet 结构
+        # 对于 MinkBEVBackbone，这些参数可能不会被用到，但为了兼容性保留解析
         if 'planes' in params:
             self.planes = tuple([int(e) for e in params['planes'].split(',')])
         else:
@@ -68,6 +107,13 @@ class ModelParams:
                     print(f'quantization_step - sector: {s[0]} [deg] / ring: {s[1]} [m] / z: {s[2]} [m]')
                 else:
                     print(f'quantization_step: {s} [m]')
+            # =========================================================
+            # 修改点 4: 打印新增的 BEV 参数
+            # =========================================================
+            elif e == 'coords_range':
+                print(f'coords_range: {param_dict[e]}')
+            elif e == 'div_n':
+                print(f'div_n: {param_dict[e]}')
             else:
                 print('{}: {}'.format(e, param_dict[e]))
 
@@ -80,8 +126,9 @@ def get_datetime():
 
 class TrainingParams:
     """
-    Parameters for model training
+    模型训练参数
     """
+
     def __init__(self, params_path: str, model_params_path: str, debug: bool = False):
         """
         Configuration files
@@ -90,7 +137,8 @@ class TrainingParams:
         """
 
         assert os.path.exists(params_path), 'Cannot find configuration file: {}'.format(params_path)
-        assert os.path.exists(model_params_path), 'Cannot find model-specific configuration file: {}'.format(model_params_path)
+        assert os.path.exists(model_params_path), 'Cannot find model-specific configuration file: {}'.format(
+            model_params_path)
         self.params_path = params_path
         self.model_params_path = model_params_path
         self.debug = debug
@@ -102,21 +150,19 @@ class TrainingParams:
         self.dataset_folder = params.get('dataset_folder')
 
         params = config['TRAIN']
-        self.save_freq = params.getint('save_freq', 0)          # Model saving frequency (in epochs)
+        self.save_freq = params.getint('save_freq', 0)  # 模型保存频率 (epochs)
         self.num_workers = params.getint('num_workers', 0)
 
-        # Initial batch size for global descriptors (for both main and secondary dataset)
+        # 全局描述子的初始 batch size
         self.batch_size = params.getint('batch_size', 64)
-        # When batch_split_size is non-zero, multistage backpropagation is enabled
+        # 当 batch_split_size 非零时，启用多阶段反向传播
         self.batch_split_size = params.getint('batch_split_size', None)
 
-        # Set batch_expansion_th to turn on dynamic batch sizing
-        # When number of non-zero triplets falls below batch_expansion_th, expand batch size
+        # 动态 batch size 调整
         self.batch_expansion_th = params.getfloat('batch_expansion_th', None)
         if self.batch_expansion_th is not None:
             assert 0. < self.batch_expansion_th < 1., 'batch_expansion_th must be between 0 and 1'
             self.batch_size_limit = params.getint('batch_size_limit', 256)
-            # Batch size expansion rate
             self.batch_expansion_rate = params.getfloat('batch_expansion_rate', 1.5)
             assert self.batch_expansion_rate > 1., 'batch_expansion_rate must be greater than 1'
         else:
@@ -137,7 +183,7 @@ class TrainingParams:
                     scheduler_milestones = params.get('scheduler_milestones')
                     self.scheduler_milestones = [int(e) for e in scheduler_milestones.split(',')]
                 else:
-                    self.scheduler_milestones = [self.epochs+1]
+                    self.scheduler_milestones = [self.epochs + 1]
             else:
                 raise NotImplementedError('Unsupported LR scheduler: {}'.format(self.scheduler))
 
@@ -147,25 +193,23 @@ class TrainingParams:
             self.pos_margin = params.getfloat('pos_margin', 0.2)
             self.neg_margin = params.getfloat('neg_margin', 0.65)
         elif 'triplet' in self.loss:
-            self.margin = params.getfloat('margin', 0.4)    # Margin used in loss function
+            self.margin = params.getfloat('margin', 0.4)  # Margin used in loss function
         elif self.loss == 'truncatedsmoothap':
-            # Number of best positives (closest to the query) to consider
             self.positives_per_query = params.getint("positives_per_query", 4)
-            # Temperatures (annealing parameter) and numbers of nearest neighbours to consider
             self.tau1 = params.getfloat('tau1', 0.01)
-            self.margin = params.getfloat('margin', None)    # Margin used in loss function
+            self.margin = params.getfloat('margin', None)  # Margin used in loss function
 
-        # Similarity measure: based on cosine similarity or Euclidean distance
+        # 相似度度量: 余弦相似度 或 欧氏距离
         self.similarity = params.get('similarity', 'euclidean')
         assert self.similarity in ['cosine', 'euclidean']
 
-        self.aug_mode = params.getint('aug_mode', 1)    # Augmentation mode (1 is default)
-        self.set_aug_mode = params.getint('set_aug_mode', 1)    # Augmentation mode (1 is default)
+        self.aug_mode = params.getint('aug_mode', 1)  # 增强模式
+        self.set_aug_mode = params.getint('set_aug_mode', 1)  # Set 增强模式
         self.train_file = params.get('train_file')
         self.val_file = params.get('val_file', None)
         self.test_file = params.get('test_file', None)
 
-        # Read model parameters
+        # 读取模型参数
         self.model_params = ModelParams(self.model_params_path)
         self._check_params()
 
@@ -181,4 +225,3 @@ class TrainingParams:
 
         self.model_params.print()
         print('')
-

@@ -72,12 +72,6 @@ def evaluate_dataset_chilean(model, device, params: TrainingParams, database_set
                              log: bool = False, show_progress: bool = False):
     """
     在Chilean数据集上运行评估
-
-    Chilean评估协议：
-    - Database来自sessions 160-189（30个sessions，完全独立）
-    - Query来自sessions 190-209（20个sessions，完全独立）
-    - 每个query在合并后的所有database中搜索最近邻
-    - 正样本：地理距离10米内的点云
     """
 
     model.eval()
@@ -178,7 +172,7 @@ def evaluate_dataset_chilean(model, device, params: TrainingParams, database_set
             # 查找最近的num_neighbors个邻居
             distances, indices = database_nbrs.query(np.array([queries_output[query_idx]]), k=num_neighbors)
 
-            # ========== 修复后的Recall计算逻辑 ==========
+            # ========== Recall计算逻辑 ==========
             # 检查返回的top-k中是否有正样本
             for k in range(len(indices[0])):
                 if indices[0][k] in true_neighbors_global:
@@ -214,15 +208,6 @@ def evaluate_dataset_chilean(model, device, params: TrainingParams, database_set
 def get_latent_vectors(model, point_cloud_set, device, params: TrainingParams):
     """
     计算点云集合的embeddings
-
-    Args:
-        model: 模型
-        point_cloud_set: 点云字典 {idx: {'query': path, 'northing': ..., 'easting': ...}}
-        device: 计算设备
-        params: 训练参数
-
-    Returns:
-        embeddings: numpy数组 (N, embedding_dim)
     """
 
     if params.debug:
@@ -244,23 +229,41 @@ def get_latent_vectors(model, point_cloud_set, device, params: TrainingParams):
             embeddings = np.zeros((len(point_cloud_set), embedding.shape[1]), dtype=embedding.dtype)
         embeddings[i] = embedding
 
-        # 添加：定期清理GPU缓存
+        # 定期清理GPU缓存
         if (i + 1) % 50 == 0:
             torch.cuda.empty_cache()
 
-    # 添加：最后再清理一次
     torch.cuda.empty_cache()
 
     return embeddings
 
 
 def compute_embedding(model, pc, device, params: TrainingParams):
-    """计算单个点云的embedding"""
-    coords, _ = params.model_params.quantizer(pc)
+    """
+    计算单个点云的embedding
+    修正：兼容 BEVQuantizer (返回 32维特征) 和 普通Quantizer (返回 1维特征)
+    """
+    # 1. 调用量化器
+    res = params.model_params.quantizer(pc)
+
+    # 2. 判断返回类型
+    # BEVQuantizer 返回 (coords, features)，其中 features 是 2D Tensor (M, C)
+    # Polar/Cartesian 返回 (coords, indices)，其中 indices 是 1D Tensor 或 Array
+    if len(res) == 2 and isinstance(res[1], torch.Tensor) and res[1].dim() == 2:
+        # --- 命中 BEVQuantizer 逻辑 ---
+        coords = res[0]
+        feats = res[1]  # 使用量化器生成的真实特征 (M, 32)
+    else:
+        # --- 命中 普通逻辑 ---
+        coords = res[0]
+        # 创建 Dummy 特征 (M, 1)
+        feats = torch.ones((coords.shape[0], 1), dtype=torch.float32)
 
     with torch.no_grad():
         bcoords = ME.utils.batched_coordinates([coords])
-        feats = torch.ones((bcoords.shape[0], 1), dtype=torch.float32)
+
+        # 3. 构造 batch
+        # 注意：这里 feats 可能是 32维，也可能是 1维，取决于上面的分支
         batch = {'coords': bcoords.to(device), 'features': feats.to(device)}
 
         # 计算全局描述符
@@ -271,7 +274,7 @@ def compute_embedding(model, pc, device, params: TrainingParams):
 
 
 def print_eval_stats(stats):
-    """打印评估统计信息（格式与Oxford一致）"""
+    """打印评估统计信息"""
     if stats is None:
         print("❌ 评估失败")
         return
@@ -296,12 +299,13 @@ def chilean_write_eval_stats(file_name, prefix, stats):
 
 
 if __name__ == "__main__":
-    # 直接设置参数
+    # 直接设置参数 (用于单独运行此脚本调试)
     class Args:
         def __init__(self):
-            self.config = '../config/config_chilean_baseline.txt'
-            self.model_config = '../models/minkloc3dv2.txt'
-            self.weights = '/home/wzj/pan1/MinkLoc3dv2_Chilean/weights/model_MinkLoc_20251203_1723_final.pth'  # 设置为训练好的权重文件路径
+            self.config = '../config/config_chilean_bev.txt'
+            self.model_config = '../models/minkloc_bev.txt'
+            self.weights = '/home/wzj/pan1/MinkLocBev_Chilean_原始点云/weights/model_MinkLocBEV_20251221_1045_final.pth'
+            # self.weights = None
             self.debug = False
 
 

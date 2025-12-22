@@ -55,33 +55,54 @@ def make_collate_fn(dataset: TrainingDataset, quantizer, batch_split_size=None):
         # Compute positives and negatives mask
         # dataset.queries[label]['positives'] is bitarray
         positives_mask = [[in_sorted_array(e, dataset.queries[label].positives) for e in labels] for label in labels]
-        negatives_mask = [[not in_sorted_array(e, dataset.queries[label].non_negatives) for e in labels] for label in labels]
+        negatives_mask = [[not in_sorted_array(e, dataset.queries[label].non_negatives) for e in labels] for label in
+                          labels]
         positives_mask = torch.tensor(positives_mask)
         negatives_mask = torch.tensor(negatives_mask)
 
-        # Convert to polar (when polar coords are used) and quantize
-        # Use the first value returned by quantizer
-        coords = [quantizer(e)[0] for e in clouds]
+        # =========================================================
+        # 修改部分：支持 BEV 特征输入
+        # =========================================================
+        batch_coords = []
+        batch_feats = []
+
+        for e in clouds:
+            res = quantizer(e)
+
+            # 判断 quantizer 的返回值类型
+            # 如果是 BEVQuantizer，它返回 (coords, features)，其中 features 是 (M, C) 的 Tensor
+            # 如果是原版 Quantizer，它返回 (coords, indices)，其中 indices 是 (M,) 的 Tensor 或 int数组
+            if len(res) == 2 and isinstance(res[1], torch.Tensor) and res[1].dim() == 2:
+                # 命中 BEVQuantizer 逻辑
+                c, f = res
+                batch_coords.append(c)
+                batch_feats.append(f)
+            else:
+                # 命中原版逻辑 (Polar/Cartesian)
+                c, _ = res
+                batch_coords.append(c)
+                # 创建全1的 dummy feature
+                f = torch.ones((c.shape[0], 1), dtype=torch.float32)
+                batch_feats.append(f)
 
         if batch_split_size is None or batch_split_size == 0:
-            coords = ME.utils.batched_coordinates(coords)
-            # Assign a dummy feature equal to 1 to each point
-            feats = torch.ones((coords.shape[0], 1), dtype=torch.float32)
+            coords = ME.utils.batched_coordinates(batch_coords)
+            feats = torch.cat(batch_feats, dim=0)
             batch = {'coords': coords, 'features': feats}
 
         else:
             # Split the batch into chunks
             batch = []
-            for i in range(0, len(coords), batch_split_size):
-                temp = coords[i:i + batch_split_size]
-                c = ME.utils.batched_coordinates(temp)
-                f = torch.ones((c.shape[0], 1), dtype=torch.float32)
+            for i in range(0, len(batch_coords), batch_split_size):
+                temp_coords = batch_coords[i:i + batch_split_size]
+                temp_feats = batch_feats[i:i + batch_split_size]
+
+                c = ME.utils.batched_coordinates(temp_coords)
+                f = torch.cat(temp_feats, dim=0)
+
                 minibatch = {'coords': c, 'features': f}
                 batch.append(minibatch)
 
-        # Returns (batch_size, n_points, 3) tensor and positives_mask and negatives_mask which are
-        # batch_size x batch_size boolean tensors
-        #return batch, positives_mask, negatives_mask, torch.tensor(sampled_positive_ndx), torch.tensor(relative_poses)
         return batch, positives_mask, negatives_mask
 
     return collate_fn
@@ -103,7 +124,7 @@ def make_dataloaders(params: TrainingParams, validation=True):
 
     # Collate function collates items into a batch and applies a 'set transform' on the entire batch
     quantizer = params.model_params.quantizer
-    train_collate_fn = make_collate_fn(datasets['train'],  quantizer, params.batch_split_size)
+    train_collate_fn = make_collate_fn(datasets['train'], quantizer, params.batch_split_size)
     dataloders['train'] = DataLoader(datasets['train'], batch_sampler=train_sampler,
                                      collate_fn=train_collate_fn, num_workers=params.num_workers,
                                      pin_memory=True)
@@ -150,4 +171,3 @@ def in_sorted_array(e: int, array: np.ndarray) -> bool:
         return False
     else:
         return array[pos] == e
-

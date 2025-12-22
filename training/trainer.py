@@ -16,6 +16,8 @@ from eval.pnv_evaluate import evaluate, print_eval_stats, pnv_write_eval_stats
 
 
 def print_global_stats(phase, stats):
+    from datetime import datetime
+
     s = f"{phase}  loss: {stats['loss']:.4f}   embedding norm: {stats['avg_embedding_norm']:.3f}  "
     if 'num_triplets' in stats:
         s += f"Triplets (all/active): {stats['num_triplets']:.1f}/{stats['num_non_zero_triplets']:.1f}  " \
@@ -29,7 +31,25 @@ def print_global_stats(phase, stats):
     if 'ap' in stats:
         s += f"AP: {stats['ap']:.4f}   "
 
+    # 添加：打印体素数和显存统计
+    if 'avg_voxels' in stats:
+        s += f"体素数: {stats['avg_voxels']:.0f}   "
+    if 'max_voxels' in stats:
+        s += f"峰值体素: {stats['max_voxels']:.0f}   "
+    if 'gpu_memory_mb' in stats:
+        s += f"显存: {stats['gpu_memory_mb']:.0f}MB   "
+
+    # 同时输出到控制台和日志文件
     print(s)
+
+    # 写入日志文件
+    log_file = "/home/wzj/pan1/MinkLoc3dv2_Chilean_原始点云/training/trainer.log"
+    log_dir = os.path.dirname(log_file)
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+
+    with open(log_file, 'a') as f:
+        f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {s}\n")
 
 
 def print_stats(phase, stats):
@@ -54,6 +74,20 @@ def training_step(global_iter, model, phase, device, optimizer, loss_fn):
 
     optimizer.zero_grad()
 
+    # 监控：记录batch中的体素数
+    voxel_counts = []
+    if isinstance(batch['coords'], torch.Tensor):
+        # 单个batch
+        batch_indices = batch['coords'][:, 0]  # 第一列是batch索引
+        for i in range(int(batch_indices.max()) + 1):
+            voxels_in_sample = (batch_indices == i).sum().item()
+            voxel_counts.append(voxels_in_sample)
+
+    # 监控：记录显存占用（训练前）
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        memory_allocated = torch.cuda.memory_allocated(device) / 1024 / 1024  # MB
+
     with torch.set_grad_enabled(phase == 'train'):
         y = model(batch)
         stats = model.stats.copy() if hasattr(model, 'stats') else {}
@@ -63,9 +97,21 @@ def training_step(global_iter, model, phase, device, optimizer, loss_fn):
         loss, temp_stats = loss_fn(embeddings, positives_mask, negatives_mask)
         temp_stats = tensors_to_numbers(temp_stats)
         stats.update(temp_stats)
+
         if phase == 'train':
             loss.backward()
             optimizer.step()
+
+    # 监控：添加体素统计到stats
+    if voxel_counts:
+        stats['avg_voxels'] = np.mean(voxel_counts)
+        stats['max_voxels'] = np.max(voxel_counts)
+        stats['min_voxels'] = np.min(voxel_counts)
+
+    # 监控：添加显存占用到stats
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        stats['gpu_memory_mb'] = torch.cuda.memory_allocated(device) / 1024 / 1024
 
     torch.cuda.empty_cache()  # Prevent excessive GPU memory consumption by SparseTensors
 
@@ -87,12 +133,22 @@ def multistaged_training_step(global_iter, model, phase, device, optimizer, loss
     else:
         model.eval()
 
+    # 监控：记录所有minibatch的体素数
+    all_voxel_counts = []
+
     # Stage 1 - calculate descriptors of each batch element (with gradient turned off)
     # In training phase network is in the train mode to update BatchNorm stats
     embeddings_l = []
     with torch.set_grad_enabled(False):
         for minibatch in batch:
             minibatch = {e: minibatch[e].to(device) for e in minibatch}
+
+            # 监控：统计当前minibatch的体素数
+            batch_indices = minibatch['coords'][:, 0]
+            for i in range(int(batch_indices.max()) + 1):
+                voxels_in_sample = (batch_indices == i).sum().item()
+                all_voxel_counts.append(voxels_in_sample)
+
             y = model(minibatch)
             embeddings_l.append(y['global'])
 
@@ -127,10 +183,21 @@ def multistaged_training_step(global_iter, model, phase, device, optimizer, loss
                 # Compute gradients of network params w.r.t. the loss using the chain rule (using the
                 # gradient of the loss w.r.t. embeddings stored in embeddings_grad)
                 # By default gradients are accumulated
-                embeddings.backward(gradient=embeddings_grad[i: i+minibatch_size])
+                embeddings.backward(gradient=embeddings_grad[i: i + minibatch_size])
                 i += minibatch_size
 
             optimizer.step()
+
+    # 监控：添加体素统计到stats
+    if all_voxel_counts:
+        stats['avg_voxels'] = np.mean(all_voxel_counts)
+        stats['max_voxels'] = np.max(all_voxel_counts)
+        stats['min_voxels'] = np.min(all_voxel_counts)
+
+    # 监控：添加显存占用到stats
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        stats['gpu_memory_mb'] = torch.cuda.memory_allocated(device) / 1024 / 1024
 
     torch.cuda.empty_cache()  # Prevent excessive GPU memory consumption by SparseTensors
 
@@ -138,6 +205,18 @@ def multistaged_training_step(global_iter, model, phase, device, optimizer, loss
 
 
 def do_train(params: TrainingParams, skip_final_eval=False):
+    # 初始化日志文件
+    from datetime import datetime
+    log_file = "/home/wzj/pan1/MinkLoc3dv2_Chilean_原始点云/training/trainer.log"
+    log_dir = os.path.dirname(log_file)
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+
+    with open(log_file, 'a') as f:
+        f.write(f"\n{'=' * 80}\n")
+        f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 开始训练\n")
+        f.write(f"{'=' * 80}\n")
+
     # Create model class
 
     s = get_datetime()
@@ -183,7 +262,7 @@ def do_train(params: TrainingParams, skip_final_eval=False):
         scheduler = None
     else:
         if params.scheduler == 'CosineAnnealingLR':
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=params.epochs+1,
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=params.epochs + 1,
                                                                    eta_min=params.min_lr)
         elif params.scheduler == 'MultiStepLR':
             scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, params.scheduler_milestones, gamma=0.1)
@@ -223,7 +302,7 @@ def do_train(params: TrainingParams, skip_final_eval=False):
         phases = ['train']
 
     for epoch in tqdm.tqdm(range(1, params.epochs + 1)):
-        metrics = {'train': {}, 'val': {}}      # Metrics for wandb reporting
+        metrics = {'train': {}, 'val': {}}  # Metrics for wandb reporting
 
         for phase in phases:
             running_stats = []  # running stats for the current epoch and phase
@@ -281,10 +360,9 @@ def do_train(params: TrainingParams, skip_final_eval=False):
             if 'ap' in epoch_stats['global']:
                 metrics[phase]['AP'] = epoch_stats['global']['ap']
 
-
         # ******* FINALIZE THE EPOCH *******
 
-        #wandb.log(metrics)
+        # wandb.log(metrics)
 
         if scheduler is not None:
             scheduler.step()

@@ -11,7 +11,7 @@ class TrainSetTransform:
     def __init__(self, aug_mode):
         self.aug_mode = aug_mode
         if self.aug_mode == 1:
-            t = [RandomRotation(max_theta=5, axis=np.array([0, 0, 1])),
+            t = [RandomRotation(max_theta=180, axis=np.array([0, 0, 1])),
                  RandomFlip([0.25, 0.25, 0.])]
         else:
             raise NotImplementedError('Unknown aug_mode: {}'.format(self.aug_mode))

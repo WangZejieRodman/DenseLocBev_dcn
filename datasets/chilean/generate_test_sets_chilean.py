@@ -20,7 +20,7 @@ QUERY_SESSION_START = 195  # 查询使用的session范围（当前数据）
 QUERY_SESSION_END = 209
 
 # 正样本距离阈值（评估时使用）
-POSITIVE_THRESHOLD = 10  # 10米内为正样本
+POSITIVE_THRESHOLD = 7  # 7米内为正样本
 
 
 def output_to_file(output, filename):
