@@ -12,7 +12,6 @@ from misc.utils import TrainingParams, get_datetime
 from models.losses.loss import make_losses
 from models.model_factory import model_factory
 from datasets.dataset_utils import make_dataloaders
-from eval.pnv_evaluate import evaluate, print_eval_stats, pnv_write_eval_stats
 
 
 def print_global_stats(phase, stats):
@@ -31,11 +30,11 @@ def print_global_stats(phase, stats):
     if 'ap' in stats:
         s += f"AP: {stats['ap']:.4f}   "
 
-    # 添加：打印体素数和显存统计
-    if 'avg_voxels' in stats:
-        s += f"体素数: {stats['avg_voxels']:.0f}   "
-    if 'max_voxels' in stats:
-        s += f"峰值体素: {stats['max_voxels']:.0f}   "
+    # 添加：打印占用率和显存统计
+    if 'avg_occupancy_pct' in stats:
+        s += f"平均占用率: {stats['avg_occupancy_pct']:.1f}%   "
+    if 'max_occupancy_pct' in stats:
+        s += f"峰值占用率: {stats['max_occupancy_pct']:.1f}%   "
     if 'gpu_memory_mb' in stats:
         s += f"显存: {stats['gpu_memory_mb']:.0f}MB   "
 
@@ -74,14 +73,16 @@ def training_step(global_iter, model, phase, device, optimizer, loss_fn):
 
     optimizer.zero_grad()
 
-    # 监控：记录batch中的体素数
-    voxel_counts = []
-    if isinstance(batch['coords'], torch.Tensor):
-        # 单个batch
-        batch_indices = batch['coords'][:, 0]  # 第一列是batch索引
-        for i in range(int(batch_indices.max()) + 1):
-            voxels_in_sample = (batch_indices == i).sum().item()
-            voxel_counts.append(voxels_in_sample)
+    # 监控：记录非零grid占比
+    if isinstance(batch['features'], torch.Tensor):
+        # batch['features'] shape: (B, 32, 256, 256)
+        features = batch['features']
+        non_zero_ratios = []
+        for i in range(features.shape[0]):
+            non_zero_count = (features[i] > 0).sum().item()
+            total_grids = features[i].numel()
+            ratio = non_zero_count / total_grids * 100  # 百分比
+            non_zero_ratios.append(ratio)
 
     # 监控：记录显存占用（训练前）
     if torch.cuda.is_available():
@@ -102,11 +103,11 @@ def training_step(global_iter, model, phase, device, optimizer, loss_fn):
             loss.backward()
             optimizer.step()
 
-    # 监控：添加体素统计到stats
-    if voxel_counts:
-        stats['avg_voxels'] = np.mean(voxel_counts)
-        stats['max_voxels'] = np.max(voxel_counts)
-        stats['min_voxels'] = np.min(voxel_counts)
+    # 监控：添加非零grid占比统计到stats
+    if non_zero_ratios:
+        stats['avg_occupancy_pct'] = np.mean(non_zero_ratios)
+        stats['max_occupancy_pct'] = np.max(non_zero_ratios)
+        stats['min_occupancy_pct'] = np.min(non_zero_ratios)
 
     # 监控：添加显存占用到stats
     if torch.cuda.is_available():
@@ -143,11 +144,13 @@ def multistaged_training_step(global_iter, model, phase, device, optimizer, loss
         for minibatch in batch:
             minibatch = {e: minibatch[e].to(device) for e in minibatch}
 
-            # 监控：统计当前minibatch的体素数
-            batch_indices = minibatch['coords'][:, 0]
-            for i in range(int(batch_indices.max()) + 1):
-                voxels_in_sample = (batch_indices == i).sum().item()
-                all_voxel_counts.append(voxels_in_sample)
+            # 监控：统计当前minibatch的非零grid占比
+            features = minibatch['features']
+            for i in range(features.shape[0]):
+                non_zero_count = (features[i] > 0).sum().item()
+                total_grids = features[i].numel()
+                ratio = non_zero_count / total_grids * 100
+                all_voxel_counts.append(ratio)  # 复用变量名
 
             y = model(minibatch)
             embeddings_l.append(y['global'])
@@ -387,19 +390,9 @@ def do_train(params: TrainingParams, skip_final_eval=False):
 
     # Evaluate the final (可选)
     if not skip_final_eval:
-        # PointNetVLAD datasets evaluation protocol
-        stats = evaluate(model, device, params, log=False)
-        print_eval_stats(stats)
-
-        print('.')
-
-        # Append key experimental metrics to experiment summary file
-        model_params_name = os.path.split(params.model_params.model_params_path)[1]
-        config_name = os.path.split(params.params_path)[1]
-        model_name = os.path.splitext(os.path.split(final_model_path)[1])[0]
-        prefix = "{}, {}, {}".format(model_params_name, config_name, model_name)
-
-        pnv_write_eval_stats("pnv_experiment_results.txt", prefix, stats)
+        print('\n' + '=' * 60)
+        print('Training completed! Skipping Oxford evaluation (BEV-only mode).')
+        print('=' * 60)
 
     # 返回模型和路径供Chilean训练使用
     return model, model_pathname

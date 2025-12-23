@@ -1,10 +1,11 @@
 [MODEL]
-model=MinkLocBEV
-feature_size=256
+model=DenseBEV
+feature_size=512
 output_dim=256
 pooling=GeM
 normalize_embeddings=False
 
+# Dense BEV configuration
 coordinates=bev
 coords_range=-10., -10, -4, 10, 10, 8
 div_n=256, 256, 32

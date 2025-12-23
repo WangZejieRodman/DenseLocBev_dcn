@@ -4,7 +4,6 @@ import numpy as np
 from typing import List
 import torch
 from torch.utils.data import DataLoader
-import MinkowskiEngine as ME
 from sklearn.neighbors import KDTree
 
 from datasets.base_datasets import EvaluationTuple, TrainingDataset
@@ -38,8 +37,9 @@ def make_datasets(params: TrainingParams, validation: bool = True):
 
 
 def make_collate_fn(dataset: TrainingDataset, quantizer, batch_split_size=None):
-    # quantizer: converts to polar (when polar coords are used) and quantizes
-    # batch_split_size: if not None, splits the batch into a list of multiple mini-batches with batch_split_size elems
+    """
+    Dense版本的collate_fn
+    """
     def collate_fn(data_list):
         # Constructs a batch object
         clouds = [e[0] for e in data_list]
@@ -53,7 +53,6 @@ def make_collate_fn(dataset: TrainingDataset, quantizer, batch_split_size=None):
             clouds = clouds.split(lens)
 
         # Compute positives and negatives mask
-        # dataset.queries[label]['positives'] is bitarray
         positives_mask = [[in_sorted_array(e, dataset.queries[label].positives) for e in labels] for label in labels]
         negatives_mask = [[not in_sorted_array(e, dataset.queries[label].non_negatives) for e in labels] for label in
                           labels]
@@ -61,46 +60,26 @@ def make_collate_fn(dataset: TrainingDataset, quantizer, batch_split_size=None):
         negatives_mask = torch.tensor(negatives_mask)
 
         # =========================================================
-        # 修改部分：支持 BEV 特征输入
+        # Dense BEV 特征输入
         # =========================================================
-        batch_coords = []
-        batch_feats = []
+        batch_features = []
 
         for e in clouds:
-            res = quantizer(e)
-
-            # 判断 quantizer 的返回值类型
-            # 如果是 BEVQuantizer，它返回 (coords, features)，其中 features 是 (M, C) 的 Tensor
-            # 如果是原版 Quantizer，它返回 (coords, indices)，其中 indices 是 (M,) 的 Tensor 或 int数组
-            if len(res) == 2 and isinstance(res[1], torch.Tensor) and res[1].dim() == 2:
-                # 命中 BEVQuantizer 逻辑
-                c, f = res
-                batch_coords.append(c)
-                batch_feats.append(f)
-            else:
-                # 命中原版逻辑 (Polar/Cartesian)
-                c, _ = res
-                batch_coords.append(c)
-                # 创建全1的 dummy feature
-                f = torch.ones((c.shape[0], 1), dtype=torch.float32)
-                batch_feats.append(f)
+            dense_bev = quantizer(e)  # 返回 (32, 256, 256) tensor
+            batch_features.append(dense_bev)
 
         if batch_split_size is None or batch_split_size == 0:
-            coords = ME.utils.batched_coordinates(batch_coords)
-            feats = torch.cat(batch_feats, dim=0)
-            batch = {'coords': coords, 'features': feats}
+            # Stack into (B, 32, 256, 256)
+            features = torch.stack(batch_features, dim=0)
+            batch = {'features': features}
 
         else:
             # Split the batch into chunks
             batch = []
-            for i in range(0, len(batch_coords), batch_split_size):
-                temp_coords = batch_coords[i:i + batch_split_size]
-                temp_feats = batch_feats[i:i + batch_split_size]
-
-                c = ME.utils.batched_coordinates(temp_coords)
-                f = torch.cat(temp_feats, dim=0)
-
-                minibatch = {'coords': c, 'features': f}
+            for i in range(0, len(batch_features), batch_split_size):
+                temp_feats = batch_features[i:i + batch_split_size]
+                f = torch.stack(temp_feats, dim=0)
+                minibatch = {'features': f}
                 batch.append(minibatch)
 
         return batch, positives_mask, negatives_mask

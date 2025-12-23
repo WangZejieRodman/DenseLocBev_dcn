@@ -186,7 +186,7 @@ def save_text_report(all_stats, angles, baseline_top1p, baseline_recall1,
 
 if __name__ == "__main__":
     # 加载结果
-    result_file = "/home/wzj/pan1/MinkLocBev_Chilean_原始点云/training/rotation_results_model_MinkLocBEV_20251221_1346_final.pkl"
+    result_file = "/home/wzj/pan1/DenseLocBev/training/rotation_results_model_MinkLocBEV_20251223_0111_final.pkl"
     all_stats = load_rotation_results(result_file)
 
     # 分析并打印结果

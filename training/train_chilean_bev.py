@@ -95,7 +95,7 @@ if __name__ == '__main__':
             self.config = '../config/config_chilean_bev.txt'
 
             # 2. 模型结构配置文件
-            self.model_config = '../models/minkloc_bev.txt'
+            self.model_config = '../models/denseloc_bev.txt'
 
             # 3. 调试模式
             self.debug = False

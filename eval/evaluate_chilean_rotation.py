@@ -255,32 +255,13 @@ def get_latent_vectors(model, point_cloud_set, device, params: TrainingParams, r
 
 
 def compute_embedding(model, pc, device, params: TrainingParams):
-    """
-    计算单个点云的embedding
-    修正: 兼容 BEVQuantizer (返回 32维特征) 和 普通Quantizer (返回 1维特征)
-    """
-    # 1. 调用量化器
-    res = params.model_params.quantizer(pc)
-
-    # 2. 判断返回类型
-    # BEVQuantizer 返回 (coords, features)，其中 features 是 2D Tensor (M, C)
-    if len(res) == 2 and isinstance(res[1], torch.Tensor) and res[1].dim() == 2:
-        # --- 命中 BEVQuantizer 逻辑 ---
-        coords = res[0]
-        feats = res[1]  # 使用量化器生成的真实特征 (M, 32)
-    else:
-        # --- 命中 普通逻辑 ---
-        coords = res[0]
-        # 创建 Dummy 特征 (M, 1)
-        feats = torch.ones((coords.shape[0], 1), dtype=torch.float32)
+    """计算单个点云的embedding（Dense BEV版本）"""
+    dense_bev = params.model_params.quantizer(pc)  # (32, 256, 256)
 
     with torch.no_grad():
-        bcoords = ME.utils.batched_coordinates([coords])
+        features = dense_bev.unsqueeze(0).to(device)
+        batch = {'features': features}
 
-        # 3. 构造 batch
-        batch = {'coords': bcoords.to(device), 'features': feats.to(device)}
-
-        # 计算全局描述符
         y = model(batch)
         embedding = y['global'].detach().cpu().numpy()
 
@@ -300,11 +281,11 @@ if __name__ == "__main__":
         def __init__(self):
             # 这里指向我们刚刚创建的 BEV 配置文件
             self.config = '../config/config_chilean_bev.txt'
-            self.model_config = '../models/minkloc_bev.txt'
+            self.model_config = '../models/denseloc_bev.txt'
 
             # 权重文件: 请修改为你刚刚训练生成的 .pth 文件路径
             # 例如:
-            self.weights = '/home/wzj/pan1/MinkLocBev_Chilean_原始点云/weights/model_MinkLocBEV_20251221_1045_final.pth'
+            self.weights = '/home/wzj/pan1/DenseLocBev/weights/model_DenseBEV_20251223_0111_final.pth'
             self.debug = False
 
 

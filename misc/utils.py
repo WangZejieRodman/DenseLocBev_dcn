@@ -8,7 +8,7 @@ import numpy as np
 # =========================================================
 # 修改点 1: 导入 BEVQuantizer
 # =========================================================
-from datasets.quantization import PolarQuantizer, CartesianQuantizer, BEVQuantizer
+from datasets.quantization import BEVQuantizer
 
 
 class ModelParams:
@@ -19,104 +19,47 @@ class ModelParams:
 
         self.model_params_path = model_params_path
         self.model = params.get('model')
-        self.output_dim = params.getint('output_dim', 256)  # 最终全局描述子的维度
+        self.output_dim = params.getint('output_dim', 256)
 
-        #######################################################################
-        # Model dependent
-        #######################################################################
+        # =====================================================
+        # BEV 专用配置（移除了 polar 和 cartesian 分支）
+        # =====================================================
+        self.coordinates = params.get('coordinates', 'bev')
+        assert self.coordinates == 'bev', f'Only BEV coordinates supported, got: {self.coordinates}'
 
-        self.coordinates = params.get('coordinates', 'polar')
-        # =========================================================
-        # 修改点 2: 在 assert 中允许 'bev'
-        # =========================================================
-        assert self.coordinates in ['polar', 'cartesian', 'bev'], f'Unsupported coordinates: {self.coordinates}'
-
-        if 'polar' in self.coordinates:
-            # 极坐标量化的3个步长: 扇区(度), 环(米), Z轴(米)
-            self.quantization_step = tuple([float(e) for e in params['quantization_step'].split(',')])
-            assert len(
-                self.quantization_step) == 3, f'Expected 3 quantization steps: for sectors (degrees), rings (meters) and z coordinate (meters)'
-            self.quantizer = PolarQuantizer(quant_step=self.quantization_step)
-
-        elif 'cartesian' in self.coordinates:
-            # 笛卡尔坐标系的单一量化步长
-            self.quantization_step = params.getfloat('quantization_step')
-            self.quantizer = CartesianQuantizer(quant_step=self.quantization_step)
-
-        # =========================================================
-        # 修改点 3: 新增 bev 坐标系的参数解析逻辑
-        # =========================================================
-        elif 'bev' in self.coordinates:
-            # 解析 BEV 特有的参数
-
-            # 1. 解析 coords_range (例如: -10., -10, -4, 10, 10, 8)
-            if 'coords_range' in params:
-                self.coords_range = [float(e) for e in params['coords_range'].split(',')]
-            else:
-                # 默认值 (Chilean数据集配置)
-                self.coords_range = [-10., -10, -4, 10, 10, 8]
-
-            # 2. 解析 div_n (例如: 256, 256, 32)
-            if 'div_n' in params:
-                self.div_n = [int(e) for e in params['div_n'].split(',')]
-            else:
-                # 默认值
-                self.div_n = [256, 256, 32]
-
-            # 3. 解析 in_channels (Z轴层数, 通常等于 div_n[2])
-            # 这个参数会被 model_factory 用来初始化 Backbone
-            self.in_channels = params.getint('in_channels', self.div_n[2])
-
-            # 4. 实例化 BEVQuantizer
-            self.quantizer = BEVQuantizer(coords_range=self.coords_range, div_n=self.div_n)
-
+        # 解析 BEV 参数
+        if 'coords_range' in params:
+            self.coords_range = [float(e) for e in params['coords_range'].split(',')]
         else:
-            raise NotImplementedError(f"Unsupported coordinates: {self.coordinates}")
+            self.coords_range = [-10., -10, -4, 10, 10, 8]
 
-        # 使用余弦相似度还是欧氏距离
-        # 当使用欧氏距离时，embedding 归一化是可选的
+        if 'div_n' in params:
+            self.div_n = [int(e) for e in params['div_n'].split(',')]
+        else:
+            self.div_n = [256, 256, 32]
+
+        self.in_channels = params.getint('in_channels', self.div_n[2])
+
+        # 实例化量化器
+        from datasets.quantization import BEVQuantizer
+        self.quantizer = BEVQuantizer(coords_range=self.coords_range, div_n=self.div_n)
+
+        # 通用参数
         self.normalize_embeddings = params.getboolean('normalize_embeddings', False)
-
-        # Backbone 输出的局部特征维度 (仅用于基于 MinkNet 的模型)
         self.feature_size = params.getint('feature_size', 256)
-
-        # 以下参数主要用于原本的 MinkFPN/ResNet 结构
-        # 对于 MinkBEVBackbone，这些参数可能不会被用到，但为了兼容性保留解析
-        if 'planes' in params:
-            self.planes = tuple([int(e) for e in params['planes'].split(',')])
-        else:
-            self.planes = tuple([32, 64, 64])
-
-        if 'layers' in params:
-            self.layers = tuple([int(e) for e in params['layers'].split(',')])
-        else:
-            self.layers = tuple([1, 1, 1])
-
-        self.num_top_down = params.getint('num_top_down', 1)
-        self.conv0_kernel_size = params.getint('conv0_kernel_size', 5)
-        self.block = params.get('block', 'BasicBlock')
         self.pooling = params.get('pooling', 'GeM')
 
     def print(self):
         print('Model parameters:')
-        param_dict = vars(self)
-        for e in param_dict:
-            if e == 'quantization_step':
-                s = param_dict[e]
-                if self.coordinates == 'polar':
-                    print(f'quantization_step - sector: {s[0]} [deg] / ring: {s[1]} [m] / z: {s[2]} [m]')
-                else:
-                    print(f'quantization_step: {s} [m]')
-            # =========================================================
-            # 修改点 4: 打印新增的 BEV 参数
-            # =========================================================
-            elif e == 'coords_range':
-                print(f'coords_range: {param_dict[e]}')
-            elif e == 'div_n':
-                print(f'div_n: {param_dict[e]}')
-            else:
-                print('{}: {}'.format(e, param_dict[e]))
-
+        print(f'  model: {self.model}')
+        print(f'  coordinates: {self.coordinates}')
+        print(f'  coords_range: {self.coords_range}')
+        print(f'  div_n: {self.div_n}')
+        print(f'  in_channels: {self.in_channels}')
+        print(f'  feature_size: {self.feature_size}')
+        print(f'  output_dim: {self.output_dim}')
+        print(f'  pooling: {self.pooling}')
+        print(f'  normalize_embeddings: {self.normalize_embeddings}')
         print('')
 
 

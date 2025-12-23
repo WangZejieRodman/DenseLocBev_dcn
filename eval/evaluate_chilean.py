@@ -239,34 +239,14 @@ def get_latent_vectors(model, point_cloud_set, device, params: TrainingParams):
 
 
 def compute_embedding(model, pc, device, params: TrainingParams):
-    """
-    计算单个点云的embedding
-    修正：兼容 BEVQuantizer (返回 32维特征) 和 普通Quantizer (返回 1维特征)
-    """
-    # 1. 调用量化器
-    res = params.model_params.quantizer(pc)
-
-    # 2. 判断返回类型
-    # BEVQuantizer 返回 (coords, features)，其中 features 是 2D Tensor (M, C)
-    # Polar/Cartesian 返回 (coords, indices)，其中 indices 是 1D Tensor 或 Array
-    if len(res) == 2 and isinstance(res[1], torch.Tensor) and res[1].dim() == 2:
-        # --- 命中 BEVQuantizer 逻辑 ---
-        coords = res[0]
-        feats = res[1]  # 使用量化器生成的真实特征 (M, 32)
-    else:
-        # --- 命中 普通逻辑 ---
-        coords = res[0]
-        # 创建 Dummy 特征 (M, 1)
-        feats = torch.ones((coords.shape[0], 1), dtype=torch.float32)
+    """计算单个点云的embedding（Dense BEV版本）"""
+    dense_bev = params.model_params.quantizer(pc)  # (32, 256, 256)
 
     with torch.no_grad():
-        bcoords = ME.utils.batched_coordinates([coords])
+        # 添加batch维度: (1, 32, 256, 256)
+        features = dense_bev.unsqueeze(0).to(device)
+        batch = {'features': features}
 
-        # 3. 构造 batch
-        # 注意：这里 feats 可能是 32维，也可能是 1维，取决于上面的分支
-        batch = {'coords': bcoords.to(device), 'features': feats.to(device)}
-
-        # 计算全局描述符
         y = model(batch)
         embedding = y['global'].detach().cpu().numpy()
 
@@ -303,8 +283,8 @@ if __name__ == "__main__":
     class Args:
         def __init__(self):
             self.config = '../config/config_chilean_bev.txt'
-            self.model_config = '../models/minkloc_bev.txt'
-            self.weights = '/home/wzj/pan1/MinkLocBev_Chilean_原始点云/weights/model_MinkLocBEV_20251221_1045_final.pth'
+            self.model_config = '../models/denseloc_bev.txt'
+            self.weights = '/home/wzj/pan1/DenseLocBev/weights/model_MinkLocBEV_20251221_1045_final.pth'
             # self.weights = None
             self.debug = False
 
